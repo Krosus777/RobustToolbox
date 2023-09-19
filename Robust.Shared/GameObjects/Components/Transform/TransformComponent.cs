@@ -20,10 +20,14 @@ namespace Robust.Shared.GameObjects
     ///     Stores the position and orientation of the entity.
     /// </summary>
     [RegisterComponent, NetworkedComponent]
-    public sealed class TransformComponent : Component, IComponentDebug
+    public sealed partial class TransformComponent : Component, IComponentDebug
     {
         [Dependency] private readonly IEntityManager _entMan = default!;
         [Dependency] private readonly IGameTiming _gameTiming = default!;
+
+        // Currently this field just exists for VV. In future, it might become a real field
+        [ViewVariables]
+        private NetEntity NetParent => _entMan.GetNetEntity(_parent);
 
         [DataField("parent")] internal EntityUid _parent;
         [DataField("pos")] internal Vector2 _localPosition = Vector2.Zero; // holds offset from grid, or offset from parent

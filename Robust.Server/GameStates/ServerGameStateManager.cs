@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics.Tracing;
 using System.Linq;
 using System.Threading.Tasks;
 using JetBrains.Annotations;
@@ -23,8 +24,9 @@ using SharpZstd.Interop;
 using Microsoft.Extensions.ObjectPool;
 using Prometheus;
 using Robust.Server.Replays;
-using Robust.Shared.Players;
+using Robust.Shared.Console;
 using Robust.Shared.Map.Components;
+using Robust.Shared.Players;
 
 namespace Robust.Server.GameStates
 {
@@ -37,7 +39,7 @@ namespace Robust.Server.GameStates
 
         private PvsSystem _pvs = default!;
 
-        [Dependency] private readonly IServerEntityManager _entityManager = default!;
+        [Dependency] private readonly EntityManager _entityManager = default!;
         [Dependency] private readonly IGameTiming _gameTiming = default!;
         [Dependency] private readonly IServerNetManager _networkManager = default!;
         [Dependency] private readonly IPlayerManager _playerManager = default!;
@@ -47,6 +49,7 @@ namespace Robust.Server.GameStates
         [Dependency] private readonly IServerEntityNetworkManager _entityNetworkManager = default!;
         [Dependency] private readonly IConfigurationManager _cfg = default!;
         [Dependency] private readonly IParallelManager _parallelMgr = default!;
+        [Dependency] private readonly IConsoleHost _conHost = default!;
 
         private static readonly Histogram _usageHistogram = Metrics.CreateHistogram("robust_game_state_update_usage",
             "Amount of time spent processing different parts of the game state update", new HistogramConfiguration
@@ -62,7 +65,7 @@ namespace Robust.Server.GameStates
         public ushort TransformNetId { get; set; }
 
         public Action<ICommonSession, GameTick>? ClientAck { get; set; }
-        public Action<ICommonSession, GameTick, EntityUid?>? ClientRequestFull { get; set; }
+        public Action<ICommonSession, GameTick, NetEntity?>? ClientRequestFull { get; set; }
 
         public void PostInject()
         {
@@ -82,6 +85,25 @@ namespace Robust.Server.GameStates
             _parallelMgr.AddAndInvokeParallelCountChanged(ResetParallelism);
 
             _cfg.OnValueChanged(CVars.NetPVSCompressLevel, _ => ResetParallelism(), true);
+
+            // temporary command for debugging PVS bugs.
+            _conHost.RegisterCommand("print_pvs_ack", PrintPvsAckInfo);
+        }
+
+        private void PrintPvsAckInfo(IConsoleShell shell, string argstr, string[] args)
+        {
+            var ack = _pvs.PlayerData.Min(x => x.Value.LastReceivedAck);
+            var players = _pvs.PlayerData
+                .Where(x => x.Value.LastReceivedAck == ack)
+                .Select(x => x.Key)
+                .Select(x => $"{x.Name} ({_entityManager.ToPrettyString(x.AttachedEntity)})");
+
+            shell.WriteLine($@"Current tick: {_gameTiming.CurTick}
+Stored oldest acked tick: {_lastOldestAck}
+Deletion history size: {_pvs.EntityPVSCollection.GetDeletedIndices(GameTick.First)?.Count ?? 0}
+Actual oldest: {ack}
+Oldest acked clients: {string.Join(", ", players)}
+");
         }
 
         private void ResetParallelism()
@@ -133,7 +155,7 @@ namespace Robust.Server.GameStates
             if (!_playerManager.TryGetSessionById(msg.MsgChannel.UserId, out var session))
                 return;
 
-            EntityUid? ent = msg.MissingEntity.IsValid() ? msg.MissingEntity : null;
+            NetEntity? ent = msg.MissingEntity.IsValid() ? msg.MissingEntity : null;
             ClientRequestFull?.Invoke(session, msg.Tick, ent);
         }
 
@@ -146,15 +168,6 @@ namespace Robust.Server.GameStates
         /// <inheritdoc />
         public void SendGameStateUpdate()
         {
-            if (!_networkManager.IsConnected)
-            {
-                // Prevent deletions piling up if we have no clients.
-                _pvs.CullDeletionHistory(GameTick.MaxValue);
-                _mapManager.CullDeletionHistory(GameTick.MaxValue);
-                _pvs.CleanupDirty(Enumerable.Empty<IPlayerSession>());
-                return;
-            }
-
             var players = _playerManager.ServerSessions.Where(o => o.Status == SessionStatus.InGame).ToArray();
 
             // Update entity positions in PVS chunks/collections
@@ -191,17 +204,24 @@ namespace Robust.Server.GameStates
 
             using (_usageHistogram.WithLabels("Clean Dirty").NewTimer())
             {
-                _pvs.CleanupDirty(_playerManager.ServerSessions);
+                _pvs.CleanupDirty(players);
             }
 
-            // keep the deletion history buffers clean
-            if (oldestAck > _lastOldestAck)
+            if (oldestAck == GameTick.MaxValue)
             {
-                using var _ = _usageHistogram.WithLabels("Cull History").NewTimer();
-                _lastOldestAck = oldestAck;
-                _pvs.CullDeletionHistory(oldestAck);
-                _mapManager.CullDeletionHistory(oldestAck);
+                // There were no connected players?
+                // In that case we just clear all deletion history.
+                _pvs.CullDeletionHistory(GameTick.MaxValue);
+                _lastOldestAck = GameTick.Zero;
+                return;
             }
+
+            if (oldestAck == _lastOldestAck)
+                return;
+
+            _lastOldestAck = oldestAck;
+            using var __ = _usageHistogram.WithLabels("Cull History").NewTimer();
+            _pvs.CullDeletionHistory(oldestAck);
         }
 
         private GameTick SendStates(IPlayerSession[] players, PvsData? pvsData)
@@ -209,8 +229,6 @@ namespace Robust.Server.GameStates
             var inputSystem = _systemManager.GetEntitySystem<InputSystem>();
             var opts = new ParallelOptions {MaxDegreeOfParallelism = _parallelMgr.ParallelProcessCount};
             var oldestAckValue = GameTick.MaxValue.Value;
-            var tQuery = _entityManager.GetEntityQuery<TransformComponent>();
-            var mQuery = _entityManager.GetEntityQuery<MetaDataComponent>();
 
             // Replays process game states in parallel with players
             Parallel.For(-1, players.Length, opts, _threadResourcesPool.Get, SendPlayer, _threadResourcesPool.Return);
@@ -219,10 +237,16 @@ namespace Robust.Server.GameStates
             {
                 try
                 {
+                    var guid = i >= 0 ? players[i].UserId.UserId : default;
+
+                    PvsEventSource.Log.WorkStart(_gameTiming.CurTick.Value, i, guid);
+
                     if (i >= 0)
-                        SendStateUpdate(i, resource, inputSystem, players[i], pvsData, mQuery, tQuery, ref oldestAckValue);
+                        SendStateUpdate(i, resource, inputSystem, players[i], pvsData, ref oldestAckValue);
                     else
                         _replay.Update();
+
+                    PvsEventSource.Log.WorkStop(_gameTiming.CurTick.Value, i, guid);
                 }
                 catch (Exception e) // Catch EVERY exception
                 {
@@ -238,7 +262,7 @@ namespace Robust.Server.GameStates
         {
             public HashSet<int>[] PlayerChunks;
             public EntityUid[][] ViewerEntities;
-            public (Dictionary<EntityUid, MetaDataComponent> metadata, RobustTree<EntityUid> tree)?[] ChunkCache;
+            public (Dictionary<NetEntity, MetaDataComponent> metadata, RobustTree<NetEntity> tree)?[] ChunkCache;
         }
 
         private PvsData? GetPVSData(IPlayerSession[] players)
@@ -248,13 +272,11 @@ namespace Robust.Server.GameStates
             var chunksCount = chunks.Count;
             var chunkBatches = (int)MathF.Ceiling((float)chunksCount / ChunkBatchSize);
             var chunkCache =
-                new (Dictionary<EntityUid, MetaDataComponent> metadata, RobustTree<EntityUid> tree)?[chunksCount];
+                new (Dictionary<NetEntity, MetaDataComponent> metadata, RobustTree<NetEntity> tree)?[chunksCount];
 
             // Update the reused trees sequentially to avoid having to lock the dictionary per chunk.
             var reuse = ArrayPool<bool>.Shared.Rent(chunksCount);
 
-            var transformQuery = _entityManager.GetEntityQuery<TransformComponent>();
-            var metadataQuery = _entityManager.GetEntityQuery<MetaDataComponent>();
             Parallel.For(0, chunkBatches,
                 new ParallelOptions { MaxDegreeOfParallelism = _parallelMgr.ParallelProcessCount },
                 i =>
@@ -265,8 +287,7 @@ namespace Robust.Server.GameStates
                     for (var j = start; j < end; ++j)
                     {
                         var (visMask, chunkIndexLocation) = chunks[j];
-                        reuse[j] = _pvs.TryCalculateChunk(chunkIndexLocation, visMask, transformQuery, metadataQuery,
-                            out var chunk);
+                        reuse[j] = _pvs.TryCalculateChunk(chunkIndexLocation, visMask, out var chunk);
                         chunkCache[j] = chunk;
 
 #if DEBUG
@@ -276,7 +297,8 @@ namespace Robust.Server.GameStates
                         // Each root nodes should simply be a map or a grid entity.
                         DebugTools.Assert(chunk.Value.tree.RootNodes.Count == 1,
                             $"Root node count is {chunk.Value.tree.RootNodes.Count} instead of 1.");
-                        var ent = chunk.Value.tree.RootNodes.FirstOrDefault();
+                        var nent = chunk.Value.tree.RootNodes.FirstOrDefault();
+                        var ent = _entityManager.GetEntity(nent);
                         DebugTools.Assert(_entityManager.EntityExists(ent), $"Root node does not exist. Node {ent}.");
                         DebugTools.Assert(_entityManager.HasComponent<MapComponent>(ent)
                                           || _entityManager.HasComponent<MapGridComponent>(ent));
@@ -299,16 +321,14 @@ namespace Robust.Server.GameStates
             InputSystem inputSystem,
             IPlayerSession session,
             PvsData? pvsData,
-            EntityQuery<MetaDataComponent> mQuery,
-            EntityQuery<TransformComponent> tQuery,
             ref uint oldestAckValue)
         {
             var channel = session.ConnectedClient;
             var sessionData = _pvs.PlayerData[session];
             var lastAck = sessionData.LastReceivedAck;
-            List<EntityUid>? leftPvs = null;
+            List<NetEntity>? leftPvs = null;
             List<EntityState>? entStates;
-            List<EntityUid>? deletions;
+            List<NetEntity>? deletions;
             GameTick fromTick;
 
             DebugTools.Assert(_pvs.CullingEnabled == (pvsData != null));
@@ -318,8 +338,6 @@ namespace Robust.Server.GameStates
                     session,
                     lastAck,
                     _gameTiming.CurTick,
-                    mQuery,
-                    tQuery,
                     pvsData.Value.ChunkCache,
                     pvsData.Value.PlayerChunks[i],
                     pvsData.Value.ViewerEntities[i]);
@@ -371,6 +389,36 @@ namespace Robust.Server.GameStates
             {
                 var pvsMessage = new MsgStateLeavePvs {Entities = leftPvs, Tick = _gameTiming.CurTick};
                 _networkManager.ServerSendMessage(pvsMessage, channel);
+            }
+        }
+
+        [EventSource(Name = "Robust.Pvs")]
+        public sealed class PvsEventSource : System.Diagnostics.Tracing.EventSource
+        {
+            public static PvsEventSource Log { get; } = new();
+
+            [Event(1)]
+            public void WorkStart(uint tick, int playerIdx, Guid playerGuid) => WriteEvent(1, tick, playerIdx, playerGuid);
+
+            [Event(2)]
+            public void WorkStop(uint tick, int playerIdx, Guid playerGuid) => WriteEvent(2, tick, playerIdx, playerGuid);
+
+            [NonEvent]
+            private unsafe void WriteEvent(int eventId, uint arg1, int arg2, Guid arg3)
+            {
+                if (IsEnabled())
+                {
+                    var descrs = stackalloc EventData[3];
+
+                    descrs[0].DataPointer = (IntPtr)(&arg1);
+                    descrs[0].Size = 4;
+                    descrs[1].DataPointer = (IntPtr)(&arg2);
+                    descrs[1].Size = 4;
+                    descrs[2].DataPointer = (IntPtr)(&arg3);
+                    descrs[2].Size = 16;
+
+                    WriteEventCore(eventId, 3, descrs);
+                }
             }
         }
     }

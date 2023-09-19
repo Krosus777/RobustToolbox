@@ -14,6 +14,7 @@ using Robust.Shared.Map.Components;
 using Robust.Shared.Maths;
 using Robust.Shared.Network;
 using Robust.Shared.Network.Messages;
+using Robust.Shared.Placement;
 using Robust.Shared.Prototypes;
 
 namespace Robust.Server.Placement
@@ -68,7 +69,7 @@ namespace Robust.Server.Placement
                     HandlePlacementRequest(msg);
                     break;
                 case PlacementManagerMessage.RequestEntRemove:
-                    HandleEntRemoveReq(msg.EntityUid);
+                    HandleEntRemoveReq(msg);
                     break;
                 case PlacementManagerMessage.RequestRectRemove:
                     HandleRectRemoveReq(msg);
@@ -81,7 +82,7 @@ namespace Robust.Server.Placement
             var alignRcv = msg.Align;
             var isTile = msg.IsTile;
 
-            ushort tileType = 0;
+            int tileType = 0;
             var entityTemplateName = "";
 
             if (isTile) tileType = msg.TileType;
@@ -97,8 +98,10 @@ namespace Robust.Server.Placement
                 return;
 
             //TODO: Distance check, so you can't place things off of screen.
+            // I don't think that's this manager's biggest problem
 
-            var coordinates = msg.EntityCoordinates;
+            var netCoordinates = msg.NetCoordinates;
+            var coordinates = _entityManager.GetCoordinates(netCoordinates);
 
             if (!coordinates.IsValid(_entityManager))
             {
@@ -155,6 +158,9 @@ namespace Robust.Server.Placement
 
                         foreach (var ent in toDelete)
                         {
+                            var placementEraseEvent = new PlacementEntityEvent(ent, coordinates, PlacementEventAction.Erase, msg.MsgChannel.UserId);
+                            _entityManager.EventBus.RaiseEvent(EventSource.Local, placementEraseEvent);
+
                             _entityManager.DeleteEntity(ent);
                         }
                     }
@@ -162,15 +168,18 @@ namespace Robust.Server.Placement
 
                 var created = _entityManager.SpawnEntity(entityTemplateName, coordinates);
 
+                var placementCreateEvent = new PlacementEntityEvent(created, coordinates, PlacementEventAction.Create, msg.MsgChannel.UserId);
+                _entityManager.EventBus.RaiseEvent(EventSource.Local, placementCreateEvent);
+
                 _entityManager.GetComponent<TransformComponent>(created).LocalRotation = dirRcv.ToAngle();
             }
             else
             {
-                PlaceNewTile(tileType, coordinates);
+                PlaceNewTile(tileType, coordinates, msg.MsgChannel.UserId);
             }
         }
 
-        private void PlaceNewTile(ushort tileType, EntityCoordinates coordinates)
+        private void PlaceNewTile(int tileType, EntityCoordinates coordinates, NetUserId placingUserId)
         {
             if (!coordinates.IsValid(_entityManager)) return;
 
@@ -184,6 +193,9 @@ namespace Robust.Server.Placement
             if (grid != null)  // stick to existing grid
             {
                 grid.SetTile(coordinates, new Tile(tileType));
+
+                var placementEraseEvent = new PlacementTileEvent(tileType, coordinates, placingUserId);
+                _entityManager.EventBus.RaiseEvent(EventSource.Local, placementEraseEvent);
             }
             else if (tileType != 0) // create a new grid
             {
@@ -192,25 +204,36 @@ namespace Robust.Server.Placement
                 newGridXform.WorldPosition = coordinates.Position - newGrid.TileSizeHalfVector; // assume bottom left tile origin
                 var tilePos = newGrid.WorldToTile(coordinates.Position);
                 newGrid.SetTile(tilePos, new Tile(tileType));
+
+                var placementEraseEvent = new PlacementTileEvent(tileType, coordinates, placingUserId);
+                _entityManager.EventBus.RaiseEvent(EventSource.Local, placementEraseEvent);
             }
         }
 
-        private void HandleEntRemoveReq(EntityUid entityUid)
+        private void HandleEntRemoveReq(MsgPlacement msg)
         {
             //TODO: Some form of admin check
-            if (_entityManager.EntityExists(entityUid))
-                _entityManager.DeleteEntity(entityUid);
+            var entity = _entityManager.GetEntity(msg.EntityUid);
+
+            if (!_entityManager.EntityExists(entity))
+                return;
+
+            var placementEraseEvent = new PlacementEntityEvent(entity, _entityManager.GetComponent<TransformComponent>(entity).Coordinates, PlacementEventAction.Erase, msg.MsgChannel.UserId);
+            _entityManager.EventBus.RaiseEvent(EventSource.Local, placementEraseEvent);
+            _entityManager.DeleteEntity(entity);
         }
 
         private void HandleRectRemoveReq(MsgPlacement msg)
         {
-            EntityCoordinates start = msg.EntityCoordinates;
+            EntityCoordinates start = _entityManager.GetCoordinates(msg.NetCoordinates);
             Vector2 rectSize = msg.RectSize;
             foreach (EntityUid entity in EntitySystem.Get<EntityLookupSystem>().GetEntitiesIntersecting(start.GetMapId(_entityManager),
                 new Box2(start.Position, start.Position + rectSize)))
             {
                 if (_entityManager.Deleted(entity) || _entityManager.HasComponent<MapGridComponent>(entity) || _entityManager.HasComponent<ActorComponent>(entity))
                     continue;
+                var placementEraseEvent = new PlacementEntityEvent(entity, _entityManager.GetComponent<TransformComponent>(entity).Coordinates, PlacementEventAction.Erase, msg.MsgChannel.UserId);
+                _entityManager.EventBus.RaiseEvent(EventSource.Local, placementEraseEvent);
                 _entityManager.DeleteEntity(entity);
             }
         }

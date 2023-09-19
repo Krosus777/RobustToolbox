@@ -4,7 +4,6 @@ using System.Diagnostics.CodeAnalysis;
 using Robust.Shared.GameObjects;
 using Robust.Shared.IoC;
 using Robust.Shared.Localization;
-using Robust.Shared.Log;
 using Robust.Shared.Map;
 using Robust.Shared.Maths;
 using Robust.Shared.Serialization;
@@ -12,6 +11,7 @@ using Robust.Shared.Serialization.Manager;
 using Robust.Shared.Serialization.Manager.Attributes;
 using Robust.Shared.Serialization.Markdown.Mapping;
 using Robust.Shared.Serialization.TypeSerializers.Implementations.Custom.Prototype.Array;
+using Robust.Shared.Serialization.TypeSerializers.Implementations.Custom.Prototype.Set;
 using Robust.Shared.ViewVariables;
 
 namespace Robust.Shared.Prototypes
@@ -21,11 +21,14 @@ namespace Robust.Shared.Prototypes
     /// Prototype that represents game entities.
     /// </summary>
     [Prototype("entity", -1)]
-    public sealed class EntityPrototype : IPrototype, IInheritingPrototype, ISerializationHooks
+    public sealed partial class EntityPrototype : IPrototype, IInheritingPrototype, ISerializationHooks
     {
         private ILocalizationManager _loc = default!;
 
         private static readonly Dictionary<string, string> LocPropertiesDefault = new();
+
+        [ValidatePrototypeId<EntityCategoryPrototype>]
+        private const string HideCategory = "hideSpawnMenu";
 
         // LOCALIZATION NOTE:
         // Localization-related properties in here are manually localized in LocalizationManager.
@@ -56,6 +59,10 @@ namespace Robust.Shared.Prototypes
 
         [DataField("suffix")]
         public string? SetSuffix { get; private set; }
+
+        [DataField("categories")]
+        [AlwaysPushInheritance]
+        public HashSet<string> Categories = new();
 
         [ViewVariables]
         public IReadOnlyDictionary<string, string> LocProperties => _locPropertiesSet ?? LocPropertiesDefault;
@@ -92,7 +99,10 @@ namespace Robust.Shared.Prototypes
         [ViewVariables]
         [NeverPushInheritance]
         [DataField("noSpawn")]
+        [Obsolete("Use the HideSpawnMenu")]
         public bool NoSpawn { get; private set; }
+
+        public bool HideSpawnMenu => Categories.Contains(HideCategory);
 
         [DataField("placement")]
         private EntityPlacementProperties PlacementProperties = new();
@@ -266,7 +276,7 @@ namespace Robust.Shared.Prototypes
         public record ComponentRegistryEntry(IComponent Component, MappingDataNode Mapping);
 
         [DataDefinition]
-        public sealed class EntityPlacementProperties
+        public sealed partial class EntityPlacementProperties
         {
             public bool PlacementOverriden { get; private set; }
             public bool SnapOverriden { get; private set; }

@@ -9,6 +9,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Robust.Shared.Map.Components;
+using Robust.Shared.Network;
 using Robust.Shared.Physics.Systems;
 using Robust.Shared.Timing;
 
@@ -21,6 +22,7 @@ namespace Robust.Shared.GameObjects
         [Dependency] private readonly EntityLookupSystem _lookup = default!;
         [Dependency] private readonly SharedMapSystem _map = default!;
         [Dependency] private readonly SharedPhysicsSystem _physics = default!;
+        [Dependency] private readonly INetManager _netMan = default!;
 
         private EntityQuery<MapGridComponent> _gridQuery;
         private EntityQuery<MetaDataComponent> _metaQuery;
@@ -279,7 +281,7 @@ namespace Robust.Shared.GameObjects
         /// <summary>
         ///     Current parent entity of this entity.
         /// </summary>
-        public readonly EntityUid ParentID;
+        public readonly NetEntity ParentID;
 
         /// <summary>
         ///     Current position offset of the entity.
@@ -308,7 +310,7 @@ namespace Robust.Shared.GameObjects
         /// <param name="rotation">Current direction offset of this entity.</param>
         /// <param name="parentId">Current parent transform of this entity.</param>
         /// <param name="noLocalRotation"></param>
-        public TransformComponentState(Vector2 localPosition, Angle rotation, EntityUid parentId, bool noLocalRotation, bool anchored)
+        public TransformComponentState(Vector2 localPosition, Angle rotation, NetEntity parentId, bool noLocalRotation, bool anchored)
         {
             LocalPosition = localPosition;
             Rotation = rotation;

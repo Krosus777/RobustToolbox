@@ -10,12 +10,11 @@ using Robust.Shared.Physics.Dynamics;
 using Robust.Shared.Prototypes;
 using Robust.Shared.Serialization.Manager;
 using Robust.Shared.Serialization.Manager.Attributes;
-using Robust.Shared.Utility;
 
 namespace Robust.UnitTesting.Server.Maps
 {
     [TestFixture]
-    public sealed class MapLoaderTest : RobustUnitTest
+    public sealed partial class MapLoaderTest : RobustUnitTest
     {
         private const string MapData = @"
 meta:
@@ -59,17 +58,18 @@ entities:
         [OneTimeSetUp]
         public void Setup()
         {
-            // For some reason RobustUnitTest doesn't discover PVSSystem but this does here so ?
-            var syssy = IoCManager.Resolve<IEntitySystemManager>();
-            syssy.Shutdown();
-            syssy.Initialize();
-
             var compFactory = IoCManager.Resolve<IComponentFactory>();
             compFactory.RegisterClass<MapDeserializeTestComponent>();
             compFactory.RegisterClass<VisibilityComponent>();
             compFactory.RegisterClass<ActorComponent>();
+            compFactory.RegisterClass<IgnoreUIRangeComponent>();
             compFactory.GenerateNetIds();
             IoCManager.Resolve<ISerializationManager>().Initialize();
+
+            // For some reason RobustUnitTest doesn't discover PVSSystem but this does here so ?
+            var syssy = IoCManager.Resolve<IEntitySystemManager>();
+            syssy.Shutdown();
+            syssy.Initialize();
 
             var resourceManager = IoCManager.Resolve<IResourceManagerInternal>();
             resourceManager.Initialize(null);
@@ -115,7 +115,7 @@ entities:
         }
 
         [DataDefinition]
-        private sealed class MapDeserializeTestComponent : Component
+        private sealed partial class MapDeserializeTestComponent : Component
         {
             [DataField("foo")] public int Foo { get; set; } = -1;
             [DataField("bar")] public int Bar { get; set; } = -1;

@@ -283,6 +283,12 @@ namespace Robust.Shared
         /// </summary>
         public static readonly CVarDef<float> NetFakeDuplicates = CVarDef.Create("net.fakeduplicates", 0f, CVar.CHEAT);
 
+        /// <summary>
+        /// When using Happy Eyeballs to try both IPv6 over IPv4, the delay that IPv4 gets to get less priority.
+        /// </summary>
+        public static readonly CVarDef<float> NetHappyEyeballsDelay =
+            CVarDef.Create("net.happy_eyeballs_delay", 0.025f, CVar.CLIENTONLY);
+
         /**
          * SUS
          */
@@ -1189,10 +1195,10 @@ namespace Robust.Shared
             CVarDef.Create("discord.enabled", true, CVar.CLIENTONLY);
 
         public static readonly CVarDef<string> DiscordRichPresenceMainIconId =
-            CVarDef.Create("discord.rich_main_icon_id", "devstation", CVar.CLIENTONLY);
+            CVarDef.Create("discord.rich_main_icon_id", "devstation", CVar.SERVER | CVar.REPLICATED);
 
         public static readonly CVarDef<string> DiscordRichPresenceSecondIconId =
-            CVarDef.Create("discord.rich_second_icon_id", "logo", CVar.CLIENTONLY);
+            CVarDef.Create("discord.rich_second_icon_id", "logo", CVar.SERVER | CVar.REPLICATED);
 
         /*
          * RES
@@ -1297,10 +1303,10 @@ namespace Robust.Shared
             CVarDef.Create("hub.tags", "", CVar.ARCHIVE | CVar.SERVERONLY);
 
         /// <summary>
-        /// URL of the master hub server to advertise to.
+        /// Comma-separated list of URLs of hub servers to advertise to.
         /// </summary>
-        public static readonly CVarDef<string> HubMasterUrl =
-            CVarDef.Create("hub.master_url", "https://central.spacestation14.io/hub/", CVar.SERVERONLY);
+        public static readonly CVarDef<string> HubUrls =
+            CVarDef.Create("hub.hub_urls", "https://central.spacestation14.io/hub/", CVar.SERVERONLY);
 
         /// <summary>
         /// URL of this server to advertise.
@@ -1509,8 +1515,8 @@ namespace Robust.Shared
         public static readonly CVarDef<bool> ReplayDynamicalScrubbing = CVarDef.Create("replay.dynamical_scrubbing", true);
 
         /// <summary>
-        /// When recording replays,
-        /// should we attempt to make a valid content bundle that can be directly executed by the launcher?
+        /// When recording replays, should we attempt to make a valid content bundle that can be directly executed by
+        /// the launcher?
         /// </summary>
         /// <remarks>
         /// This requires the server's build information to be sufficiently filled out.
@@ -1518,6 +1524,16 @@ namespace Robust.Shared
         public static readonly CVarDef<bool> ReplayMakeContentBundle =
             CVarDef.Create("replay.make_content_bundle", true);
 
+        /// <summary>
+        /// If true, this will cause the replay client to ignore some errors while loading a replay file.
+        /// </summary>
+        /// <remarks>
+        /// This might make otherwise broken replays playable, but ignoring these errors is also very likely to
+        /// cause unexpected and confusing errors elsewhere. By default this is disabled so that users report the
+        /// original exception rather than sending people on a wild-goose chase to find a non-existent bug.
+        /// </remarks>
+        public static readonly CVarDef<bool> ReplayIgnoreErrors =
+            CVarDef.Create("replay.ignore_errors", false, CVar.CLIENTONLY | CVar.ARCHIVE);
         /*
          * CFG
          */

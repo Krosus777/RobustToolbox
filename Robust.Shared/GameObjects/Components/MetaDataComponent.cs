@@ -8,6 +8,7 @@ using Robust.Shared.Timing;
 using Robust.Shared.Utility;
 using Robust.Shared.ViewVariables;
 using System;
+using System.Collections.Generic;
 
 namespace Robust.Shared.GameObjects
 {
@@ -57,11 +58,24 @@ namespace Robust.Shared.GameObjects
     ///     Contains meta data about this entity that isn't component specific.
     /// </summary>
     [RegisterComponent, NetworkedComponent]
-    public sealed class MetaDataComponent : Component
+    public sealed partial class MetaDataComponent : Component
     {
         [DataField("name")] internal string? _entityName;
         [DataField("desc")] internal string? _entityDescription;
         internal EntityPrototype? _entityPrototype;
+
+        /// <summary>
+        /// The components attached to the entity that are currently networked.
+        /// </summary>
+        [ViewVariables]
+        internal readonly Dictionary<ushort, Component> NetComponents = new();
+
+        /// <summary>
+        /// Network identifier for this entity.
+        /// </summary>
+        [ViewVariables]
+        [Access(typeof(EntityManager), Other = AccessPermissions.ReadExecute)]
+        public NetEntity NetEntity { get; internal set; } = NetEntity.Invalid;
 
         /// <summary>
         /// When this entity was paused, if applicable. Note that this is the actual time, not the duration which gets
@@ -71,7 +85,7 @@ namespace Robust.Shared.GameObjects
 
         // Every entity starts at tick 1, because they are conceptually created in the time between 0->1
         [ViewVariables]
-        public GameTick EntityLastModifiedTick { get; internal set; } = GameTick.Zero;
+        public GameTick EntityLastModifiedTick { get; internal set; } = GameTick.First;
 
         /// <summary>
         ///     This is the tick at which the client last applied state data received from the server.
@@ -80,7 +94,8 @@ namespace Robust.Shared.GameObjects
         public GameTick LastStateApplied { get; internal set; } = GameTick.Zero;
 
         /// <summary>
-        ///     This is the most recent tick at which some component was removed from this entity.
+        ///     This is the most recent tick at which a networked component was removed from this entity.
+        ///     Currently only reliable server-side, client side prediction may cause the value to be wrong.
         /// </summary>
         [ViewVariables]
         public GameTick LastComponentRemoved { get; internal set; } = GameTick.Zero;
@@ -174,15 +189,8 @@ namespace Robust.Shared.GameObjects
         /// <remarks>
         ///     Every entity will always have the first bit set to true.
         /// </remarks>
-        [Access(typeof(MetaDataSystem))]
-        public int VisibilityMask = 1;
-
-        [UsedImplicitly, ViewVariables(VVAccess.ReadWrite)]
-        private int VVVisibilityMask
-        {
-            get => VisibilityMask;
-            set => IoCManager.Resolve<IEntitySystemManager>().GetEntitySystem<MetaDataSystem>().SetVisibilityMask(Owner, value, this);
-        }
+        [ViewVariables] // TODO ACCESS RRestrict writing to server-side visibility system
+        public int VisibilityMask { get; internal set; }= 1;
 
         [ViewVariables]
         public bool EntityPaused => PauseTime != null;

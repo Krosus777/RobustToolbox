@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using Robust.Client.Graphics;
 using Robust.Client.Utility;
+using Robust.Shared.Graphics;
+using Robust.Shared.Graphics.RSI;
 using Robust.Shared.IoC;
 using Robust.Shared.Maths;
 using Robust.Shared.Resources;
@@ -34,12 +36,10 @@ namespace Robust.Client.ResourceManagement
 
         public override void Load(IResourceCache cache, ResPath path)
         {
-            var clyde = IoCManager.Resolve<IClyde>();
-
             var loadStepData = new LoadStepData {Path = path};
             LoadPreTexture(cache, loadStepData);
 
-            loadStepData.AtlasTexture = clyde.LoadTextureFromImage(
+            loadStepData.AtlasTexture = cache.Clyde.LoadTextureFromImage(
                 loadStepData.AtlasSheet,
                 loadStepData.Path.ToString());
 
@@ -118,9 +118,9 @@ namespace Robust.Client.ResourceManagement
 
                 var dirType = stateObject.DirCount switch
                 {
-                    1 => RSI.State.DirectionType.Dir1,
-                    4 => RSI.State.DirectionType.Dir4,
-                    8 => RSI.State.DirectionType.Dir8,
+                    1 => RsiDirectionType.Dir1,
+                    4 => RsiDirectionType.Dir4,
+                    8 => RsiDirectionType.Dir8,
                     _ => throw new InvalidOperationException()
                 };
 

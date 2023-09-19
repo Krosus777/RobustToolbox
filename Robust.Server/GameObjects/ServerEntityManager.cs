@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using JetBrains.Annotations;
 using Prometheus;
 using Robust.Server.Player;
@@ -42,8 +43,6 @@ namespace Robust.Server.GameObjects
 
         private ISawmill _netEntSawmill = default!;
 
-        protected override int NextEntityUid { get; set; } = (int) EntityUid.FirstUid;
-
         public override void Initialize()
         {
             _netEntSawmill = LogManager.GetSawmill("net.ent");
@@ -54,9 +53,9 @@ namespace Robust.Server.GameObjects
             base.Initialize();
         }
 
-        EntityUid IServerEntityManagerInternal.AllocEntity(EntityPrototype? prototype, EntityUid uid)
+        EntityUid IServerEntityManagerInternal.AllocEntity(EntityPrototype? prototype)
         {
-            return AllocEntity(prototype, out _, uid);
+            return AllocEntity(prototype, out _);
         }
 
         void IServerEntityManagerInternal.FinishEntityLoad(EntityUid entity, IEntityLoadContext? context)
@@ -79,37 +78,46 @@ namespace Robust.Server.GameObjects
             StartEntity(entity);
         }
 
-        private protected override EntityUid CreateEntity(string? prototypeName, EntityUid uid = default, IEntityLoadContext? context = null)
+        private protected override EntityUid CreateEntity(string? prototypeName, IEntityLoadContext? context = null)
         {
-            var entity = base.CreateEntity(prototypeName, uid, context);
+            if (prototypeName == null)
+                return base.CreateEntity(prototypeName, context);
 
-            if (!string.IsNullOrWhiteSpace(prototypeName))
-            {
-                var prototype = PrototypeManager.Index<EntityPrototype>(prototypeName);
+            if (!PrototypeManager.TryIndex<EntityPrototype>(prototypeName, out var prototype))
+                throw new EntityCreationException($"Attempted to spawn an entity with an invalid prototype: {prototypeName}");
 
-                // At this point in time, all data configure on the entity *should* be purely from the prototype.
-                // As such, we can reset the modified ticks to Zero,
-                // which indicates "not different from client's own deserialization".
-                // So the initial data for the component or even the creation doesn't have to be sent over the wire.
-                foreach (var (netId, component) in GetNetComponents(entity))
-                {
-                    // Make sure to ONLY get components that are defined in the prototype.
-                    // Others could be instantiated directly by AddComponent (e.g. ContainerManager).
-                    // And those aren't guaranteed to exist on the client, so don't clear them.
-                    var compName = ComponentFactory.GetComponentName(component.GetType());
-                    if (prototype.Components.ContainsKey(compName))
-                        component.ClearTicks();
-                }
-            }
+            var entity = base.CreateEntity(prototype, context);
 
+            // At this point in time, all data configure on the entity *should* be purely from the prototype.
+            // As such, we can reset the modified ticks to Zero,
+            // which indicates "not different from client's own deserialization".
+            // So the initial data for the component or even the creation doesn't have to be sent over the wire.
+            ClearTicks(entity, prototype);
             return entity;
         }
 
-        public override EntityStringRepresentation ToPrettyString(EntityUid uid)
+        private void ClearTicks(EntityUid entity, EntityPrototype prototype)
         {
+            foreach (var (netId, component) in GetNetComponents(entity))
+            {
+                // Make sure to ONLY get components that are defined in the prototype.
+                // Others could be instantiated directly by AddComponent (e.g. ContainerManager).
+                // And those aren't guaranteed to exist on the client, so don't clear them.
+                var compName = ComponentFactory.GetComponentName(netId);
+                if (prototype.Components.ContainsKey(compName))
+                    component.ClearTicks();
+            }
+        }
+
+        [return: NotNullIfNotNull("uid")]
+        public override EntityStringRepresentation? ToPrettyString(EntityUid? uid)
+        {
+            if (uid == null)
+                return null;
+
             TryGetComponent(uid, out ActorComponent? actor);
 
-            return base.ToPrettyString(uid) with { Session = actor?.PlayerSession };
+            return base.ToPrettyString(uid).Value with { Session = actor?.PlayerSession };
         }
 
         #region IEntityNetworkManager impl
@@ -130,9 +138,6 @@ namespace Robust.Server.GameObjects
         public void SetupNetworking()
         {
             _networkManager.RegisterNetMessage<MsgEntity>(HandleEntityNetworkMessage);
-
-            // For syncing component deletions.
-            ComponentRemoved += OnComponentRemoved;
 
             _playerManager.PlayerStatusChanged += OnPlayerStatusChanged;
 
@@ -158,15 +163,6 @@ namespace Robust.Server.GameObjects
         public uint GetLastMessageSequence(IPlayerSession session)
         {
             return _lastProcessedSequencesCmd[session];
-        }
-
-        private void OnComponentRemoved(RemovedComponentEventArgs e)
-        {
-            if (e.Terminating || !e.BaseArgs.Component.NetSyncEnabled)
-                return;
-
-            if (TryGetComponent(e.BaseArgs.Owner, out MetaDataComponent? meta))
-                meta.LastComponentRemoved = _gameTiming.CurTick;
         }
 
         /// <inheritdoc />

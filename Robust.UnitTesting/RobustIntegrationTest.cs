@@ -13,13 +13,13 @@ using Moq;
 using NUnit.Framework;
 using Robust.Client;
 using Robust.Client.GameStates;
+using Robust.Client.Player;
 using Robust.Client.Timing;
 using Robust.Client.UserInterface;
 using Robust.Server;
 using Robust.Server.Console;
 using Robust.Server.ServerStatus;
 using Robust.Shared;
-using Robust.Shared.Analyzers;
 using Robust.Shared.Asynchronous;
 using Robust.Shared.Configuration;
 using Robust.Shared.ContentPack;
@@ -27,10 +27,12 @@ using Robust.Shared.GameObjects;
 using Robust.Shared.Input;
 using Robust.Shared.IoC;
 using Robust.Shared.Log;
+using Robust.Shared.Map;
 using Robust.Shared.Network;
+using Robust.Shared.Players;
+using Robust.Shared.Prototypes;
 using Robust.Shared.Serialization;
 using Robust.Shared.Timing;
-using Robust.Shared.Utility;
 using ServerProgram = Robust.Server.Program;
 
 namespace Robust.UnitTesting
@@ -260,6 +262,38 @@ namespace Robust.UnitTesting
             public IDependencyCollection InstanceDependencyCollection => DependencyCollection;
 
             public virtual IntegrationOptions? Options { get; internal set; }
+
+            public IEntityManager EntMan { get; private set; } = default!;
+            public IPrototypeManager ProtoMan { get; private set; } = default!;
+            public IConfigurationManager CfgMan { get; private set; } = default!;
+            public ISharedPlayerManager PlayerMan { get; private set; } = default!;
+            public IGameTiming Timing { get; private set; } = default!;
+            public IMapManager MapMan { get; private set; } = default!;
+
+            protected virtual void ResolveIoC(IDependencyCollection deps)
+            {
+                EntMan = deps.Resolve<IEntityManager>();
+                ProtoMan = deps.Resolve<IPrototypeManager>();
+                CfgMan = deps.Resolve<IConfigurationManager>();
+                PlayerMan = deps.Resolve<ISharedPlayerManager>();
+                Timing = deps.Resolve<IGameTiming>();
+                MapMan = deps.Resolve<IMapManager>();
+            }
+
+            public T System<T>() where T : IEntitySystem
+            {
+                return EntMan.System<T>();
+            }
+
+            public TransformComponent Transform(EntityUid uid)
+            {
+                return EntMan.GetComponent<TransformComponent>(uid);
+            }
+
+            public MetaDataComponent MetaData(EntityUid uid)
+            {
+                return EntMan.GetComponent<MetaDataComponent>(uid);
+            }
 
             /// <summary>
             ///     Whether the instance is still alive.
@@ -544,6 +578,23 @@ namespace Robust.UnitTesting
             {
                 Stop();
             }
+
+            protected void LoadExtraPrototypes(IDependencyCollection deps, IntegrationOptions options)
+            {
+                var resMan = deps.Resolve<IResourceManagerInternal>();
+                if (options.ExtraPrototypes != null)
+                {
+                    resMan.MountString("/Prototypes/__integration_extra.yml", options.ExtraPrototypes);
+                }
+
+                if (options.ExtraPrototypeList is {} list)
+                {
+                    for (var i = 0; i < list.Count; i++)
+                    {
+                        resMan.MountString($"/Prototypes/__integration_extra_{i}.yml", list[i]);
+                    }
+                }
+            }
         }
 
         public sealed class ServerIntegrationInstance : IntegrationInstance
@@ -646,12 +697,7 @@ namespace Robust.UnitTesting
                 {
                     Options.BeforeStart?.Invoke();
                     cfg.OverrideConVars(Options.CVarOverrides.Select(p => (p.Key, p.Value)));
-
-                    if (Options.ExtraPrototypes != null)
-                    {
-                        deps.Resolve<IResourceManagerInternal>()
-                            .MountString("/Prototypes/__integration_extra.yml", Options.ExtraPrototypes);
-                    }
+                    LoadExtraPrototypes(deps, Options);
                 }
 
                 cfg.OverrideConVars(new[]
@@ -678,6 +724,7 @@ namespace Robust.UnitTesting
                 server.SetupMainLoop();
 
                 GameLoop.RunInit();
+                ResolveIoC(deps);
 
                 return server;
             }
@@ -685,6 +732,11 @@ namespace Robust.UnitTesting
 
         public sealed class ClientIntegrationInstance : IntegrationInstance
         {
+            public LocalPlayer? Player => ((IPlayerManager) PlayerMan).LocalPlayer;
+            public ICommonSession? Session => Player?.Session;
+            public NetUserId? User => Session?.UserId;
+            public EntityUid? AttachedEntity => Session?.AttachedEntity;
+
             public ClientIntegrationInstance(ClientIntegrationOptions? options) : base(options)
             {
                 ClientOptions = options;
@@ -814,12 +866,7 @@ namespace Robust.UnitTesting
                 {
                     Options.BeforeStart?.Invoke();
                     cfg.OverrideConVars(Options.CVarOverrides.Select(p => (p.Key, p.Value)));
-
-                    if (Options.ExtraPrototypes != null)
-                    {
-                        deps.Resolve<IResourceManagerInternal>()
-                            .MountString("/Prototypes/__integration_extra.yml", Options.ExtraPrototypes);
-                    }
+                    LoadExtraPrototypes(deps, Options);
                 }
 
                 cfg.OverrideConVars(new[]
@@ -854,6 +901,18 @@ namespace Robust.UnitTesting
                 client.StartupContinue(GameController.DisplayMode.Headless);
 
                 GameLoop.RunInit();
+                ResolveIoC(deps);
+
+                // Offset client generated Uids.
+                // Not that we have client-server uid separation, there might be bugs where tests might accidentally
+                // use server side uids on the client and vice versa. This can sometimes accidentally work if the
+                // entities get created in the same order. For that reason we arbitrarily increment the queued Uid by
+                // some arbitrary quantity.
+                var e = (EntityManager) EntMan;
+                for (var i = 0; i < 10; i++)
+                {
+                    e.GenerateEntityUid();
+                }
 
                 return client;
             }
@@ -1002,7 +1061,19 @@ namespace Robust.UnitTesting
             public Action? BeforeRegisterComponents { get; set; }
             public Action? BeforeStart { get; set; }
             public Assembly[]? ContentAssemblies { get; set; }
+
+            /// <summary>
+            /// String containing extra prototypes to load. Contents of the string are treated like a yaml file in the
+            /// resources folder.
+            /// </summary>
             public string? ExtraPrototypes { get; set; }
+
+            /// <summary>
+            /// List of strings containing extra prototypes to load. Contents of the strings are treated like yaml files
+            /// in the resources folder.
+            /// </summary>
+            public List<string>? ExtraPrototypeList;
+
             public LogLevel? FailureLogLevel { get; set; } = RTCVars.FailureLogLevel.DefaultValue;
             public bool ContentStart { get; set; } = false;
 

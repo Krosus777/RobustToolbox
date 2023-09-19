@@ -35,6 +35,9 @@ namespace Robust.Shared.Scripting
 
         [field: Dependency] public ToolshedManager shed { get; } = default!;
 
+        public ToolshedManager Toolshed => shed;
+        public ToolshedEnvironment Environment => shed.DefaultEnvironment;
+
         protected ScriptGlobalsShared(IDependencyCollection dependencies)
         {
             dependencies.InjectDependencies(this);
@@ -215,7 +218,8 @@ namespace Robust.Shared.Scripting
         public EntityPrototype? Prototype(EntityUid uid)
             => ent.GetComponent<MetaDataComponent>(uid).EntityPrototype;
 
-        public EntityStringRepresentation ToPrettyString(EntityUid uid)
+        [return: NotNullIfNotNull("uid")]
+        public EntityStringRepresentation? ToPrettyString(EntityUid? uid)
             => ent.ToPrettyString(uid);
 
         public IEnumerable<IComponent> AllComps(EntityUid uid)

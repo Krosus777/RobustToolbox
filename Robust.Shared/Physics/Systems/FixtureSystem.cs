@@ -45,9 +45,6 @@ namespace Robust.Shared.Physics.Systems
 
             // Can't just get physicscomp on shutdown as it may be touched completely independently.
             _physics.DestroyContacts(body);
-
-            // TODO im 99% sure  _broadphaseSystem.RemoveBody(body, component) gets triggered by this as well, so is this even needed?
-            _physics.SetCanCollide(uid, false, false, manager: component, body: body);
         }
 
         #region Public
@@ -73,14 +70,14 @@ namespace Robust.Shared.Physics.Systems
             if (manager.Fixtures.ContainsKey(id))
                 return false;
 
-            var fixture = new Fixture(id, shape, collisionLayer, collisionMask, hard, density, friction, restitution);
-            fixture.ID = id;
-            CreateFixture(uid, fixture, updates, manager, body, xform);
+            var fixture = new Fixture(shape, collisionLayer, collisionMask, hard, density, friction, restitution);
+            CreateFixture(uid, id, fixture, updates, manager, body, xform);
             return true;
         }
 
         internal void CreateFixture(
             EntityUid uid,
+            string fixtureId,
             Fixture fixture,
             bool updates = true,
             FixturesComponent? manager = null,
@@ -95,17 +92,17 @@ namespace Robust.Shared.Physics.Systems
                 return;
             }
 
-            if (string.IsNullOrEmpty(fixture.ID))
+            if (string.IsNullOrEmpty(fixtureId))
             {
                 throw new InvalidOperationException($"Tried to create a fixture without an ID!");
             }
 
-            manager.Fixtures.Add(fixture.ID, fixture);
-            fixture.Body = body;
+            manager.Fixtures.Add(fixtureId, fixture);
+            fixture.Owner = uid;
 
             if (body.CanCollide && Resolve(uid, ref xform))
             {
-                _lookup.CreateProxies(uid, xform, fixture, body);
+                _lookup.CreateProxies(uid, fixtureId, fixture, xform, body);
             }
 
             // Supposed to be wrapped in density but eh
@@ -150,7 +147,7 @@ namespace Robust.Shared.Physics.Systems
 
             if (fixture == null) return;
 
-            DestroyFixture(uid, fixture, updates, body, manager, xform);
+            DestroyFixture(uid, id, fixture, updates, body, manager, xform);
         }
 
         /// <summary>
@@ -159,6 +156,7 @@ namespace Robust.Shared.Physics.Systems
         /// <param name="updates">Whether to update mass etc. Set false if you're doing a bulk operation</param>
         public void DestroyFixture(
             EntityUid uid,
+            string fixtureId,
             Fixture fixture,
             bool updates = true,
             PhysicsComponent? body = null,
@@ -173,7 +171,7 @@ namespace Robust.Shared.Physics.Systems
             // TODO: Assert world locked
             DebugTools.Assert(manager.FixtureCount > 0);
 
-            if (!manager.Fixtures.Remove(fixture.ID))
+            if (!manager.Fixtures.Remove(fixtureId))
             {
                 Log.Error($"Tried to remove fixture from {ToPrettyString(uid)} that was already removed.");
                 return;
@@ -188,7 +186,7 @@ namespace Robust.Shared.Physics.Systems
             {
                 var map = Transform(broadphase.Owner).MapUid;
                 TryComp<PhysicsMapComponent>(map, out var physicsMap);
-                _lookup.DestroyProxies(uid, fixture, xform, broadphase, physicsMap);
+                _lookup.DestroyProxies(uid, fixtureId, fixture, xform, broadphase, physicsMap);
             }
 
 
@@ -215,9 +213,7 @@ namespace Robust.Shared.Physics.Systems
                         throw new InvalidOperationException($"Tried to setup fixture on init for {ToPrettyString(uid)} with no ID!");
                     }
 
-#pragma warning disable CS0618
-                    fixture.Body = body;
-#pragma warning restore CS0618
+                    fixture.Owner = uid;
                 }
 
                 // Make sure all the right stuff is set on the body
@@ -229,7 +225,7 @@ namespace Robust.Shared.Physics.Systems
         {
             args.State = new FixtureManagerComponentState
             {
-                Fixtures = component.Fixtures.Values.ToArray(),
+                Fixtures = component.Fixtures,
             };
         }
 
@@ -242,33 +238,24 @@ namespace Robust.Shared.Physics.Systems
                 Log.Error($"Tried to apply fixture state for an entity without physics: {ToPrettyString(uid)}");
                 return;
             }
-
-            // State handling funnies, someday we'll remove fixture.Body and it won't matter
-            // Alternatively if this is necessary just add it to FixtureSerializer.
-            foreach (var (id, fixture) in component.Fixtures)
+            foreach (var fixture in component.Fixtures.Values)
             {
-                DebugTools.Assert(id == fixture.ID);
-#pragma warning disable CS0618
-                fixture.Body = physics;
-#pragma warning restore CS0618
+                fixture.Owner = uid;
             }
 
-            var toAddFixtures = new ValueList<Fixture>();
-            var toRemoveFixtures = new ValueList<Fixture>();
+            var toAddFixtures = new ValueList<(string Id, Fixture Fixture)>();
+            var toRemoveFixtures = new ValueList<(string Id, Fixture Fixture)>();
             var computeProperties = false;
 
             // Given a bunch of data isn't serialized need to sort of re-initialise it
-            var newFixtures = new Dictionary<string, Fixture>(state.Fixtures.Length);
+            var newFixtures = new Dictionary<string, Fixture>(state.Fixtures.Count());
 
-            for (var i = 0; i < state.Fixtures.Length; i++)
+            foreach (var (id, fixture) in state.Fixtures)
             {
-                var fixture = state.Fixtures[i];
                 var newFixture = new Fixture();
                 fixture.CopyTo(newFixture);
-#pragma warning disable CS0618
-                newFixture.Body = physics;
-#pragma warning restore CS0618
-                newFixtures.Add(newFixture.ID, newFixture);
+                newFixtures.Add(id, newFixture);
+                newFixture.Owner = uid;
             }
 
             TransformComponent? xform = null;
@@ -282,12 +269,12 @@ namespace Robust.Shared.Physics.Systems
             {
                 if (!component.Fixtures.TryGetValue(id, out var existing))
                 {
-                    toAddFixtures.Add(fixture);
+                    toAddFixtures.Add((id, fixture));
                 }
                 else if (!existing.Equivalent(fixture))
                 {
-                    toRemoveFixtures.Add(existing);
-                    toAddFixtures.Add(fixture);
+                    toRemoveFixtures.Add((id, existing));
+                    toAddFixtures.Add((id, fixture));
                 }
             }
 
@@ -296,25 +283,25 @@ namespace Robust.Shared.Physics.Systems
             {
                 if (!newFixtures.ContainsKey(existingId))
                 {
-                    toRemoveFixtures.Add(existing);
+                    toRemoveFixtures.Add((existingId, existing));
                 }
             }
 
             // TODO add a DestroyFixture() override that takes in a list.
             // reduced broadphase lookups
-            foreach (var fixture in toRemoveFixtures)
+            foreach (var (id, fixture) in toRemoveFixtures)
             {
                 computeProperties = true;
-                DestroyFixture(uid, fixture, false, physics, component);
+                DestroyFixture(uid, id, fixture, false, physics, component);
             }
 
             // TODO: We also still need event listeners for shapes (Probably need C# events)
             // Or we could just make it so shapes can only be updated via fixturesystem which handles it
             // automagically (friends or something?)
-            foreach (var fixture in toAddFixtures)
+            foreach (var (id, fixture) in toAddFixtures)
             {
                 computeProperties = true;
-                CreateFixture(uid, fixture, false, component, physics, xform);
+                CreateFixture(uid, id, fixture, false, component, physics, xform);
             }
 
             if (computeProperties)
@@ -325,7 +312,7 @@ namespace Robust.Shared.Physics.Systems
 
         #region Restitution
 
-        public void SetRestitution(EntityUid uid, Fixture fixture, float value, bool update = true, FixturesComponent? manager = null)
+        public void SetRestitution(EntityUid uid, string fixtureId, Fixture fixture, float value, bool update = true, FixturesComponent? manager = null)
         {
             fixture.Restitution = value;
             if (update && Resolve(uid, ref manager))
@@ -390,7 +377,7 @@ namespace Robust.Shared.Physics.Systems
         [Serializable, NetSerializable]
         private sealed class FixtureManagerComponentState : ComponentState
         {
-            public Fixture[] Fixtures = default!;
+            public Dictionary<string, Fixture> Fixtures = default!;
         }
     }
 }
